@@ -5,7 +5,8 @@ on:
     branches:
       - main
     paths-ignore:
-      - 'README.md'
+      - README.md
+      - LICENSE
 
   workflow_dispatch:
     inputs:
@@ -44,9 +45,10 @@ jobs:
           } | tee -a "$FORGEJO_OUTPUT"
 
       - name: Build
-        run: make build
         env:
           GIT_REF: ${{ inputs.git-ref || steps.upstream.outputs.git_ref }}
+        run: |
+          make build GIT_REF="$GIT_REF"
 
       - name: Release build artifacts
         env:

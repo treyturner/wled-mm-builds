@@ -24,7 +24,7 @@ WLEDMM_DIR   ?= WLED-MM
 CLONE_DEPTH  ?= 1
 GIT_REF      ?=
 OUT_DIR      ?= build
-export IOT_SSID WPA_KEY
+export IOT_SSID WPA_KEY FORGEJO_WORKSPACE
 
 ### Env selection
 REPO_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
@@ -209,20 +209,21 @@ checkout: ## Checkout a tag/branch/commit of existing WLEDMM. Usage: make checko
 build: ## Compile the project source files (envs from platform_override.ini [platformio].default_envs)
 	@$(call require_envs)
 	$(MAKE) checkout GIT_REF="$(GIT_REF)"
+	ln -sf "$(PLATFORM_OVERRIDE_INI)" "$(REPO_ROOT)/$(WLEDMM_DIR)/platformio_override.ini"
 
 	for env in $(PIO_ENVS); do
 		echo "Building env: $$env"
 		$(PIO) run -e "$$env"
 		$(MAKE) move-bins PIO_ENVS="$$env"
 		$(MAKE) copy-bootapp0 PIO_ENVS="$$env"
-		$(MAKE) make-factory PIO_ENVS="$$env"
+		$(REPO_ROOT)/with_builder.sh sh -lc make make-factory PIO_ENVS="$$env"
 	done
 
 
 package: ## Package OTA + factory bins for existing build outputs
 	@$(call require_envs)
 	$(MAKE) move-bins
-	$(MAKE) make-factory
+	$(REPO_ROOT)/with_builder.sh sh -lc make make-factory
 
 # Produces WLEDMM_x.y.z_CamelcasedTarget_OTA.bin from .pio/build/<env>/firmware.bin
 move-bins: ## Create OTA bins (renamed firmware.bin) for each env in PIO_ENVS
@@ -286,40 +287,48 @@ move-bins: ## Create OTA bins (renamed firmware.bin) for each env in PIO_ENVS
 		cp -f "$$fw_src" "$$ota_dest"
 	done
 
-# Ensure boot_app0.bin exists in .pio/build/<env> (needed for factory merge).
 copy-bootapp0: ## Copy boot_app0.bin from the framework into .pio/build/<env>
 	@$(call require_envs)
-	cd "$(WLEDMM_DIR)"
+	$(REPO_ROOT)/with_builder.sh sh -lc "$$(cat <<'SH'
+	set -euo pipefail
 	for env in $(PIO_ENVS); do
-		build_dir=".pio/build/$$env"
-		dest="$$build_dir/boot_app0.bin"
+	build_dir=".pio/build/$${env}"
+	dest="$${build_dir}/boot_app0.bin"
 
-		if [[ -f "$$dest" ]]; then
-			echo "boot_app0: $$env already present"
-			continue
+	if [ -f "$${dest}" ]; then
+		echo "boot_app0: $${env} already present"
+		continue
+	fi
+
+	cd "$(WLEDMM_DIR)"
+	src=""
+	echo "HOME: $$HOME"
+	for pattern in \
+		".pio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin" \
+		".pio/packages/framework-arduinoespressif32@*/tools/partitions/boot_app0.bin" \
+		"$$HOME/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin" \
+		"$$HOME/.platformio/packages/framework-arduinoespressif32@*/tools/partitions/boot_app0.bin"
+	do
+		for f in $${pattern}; do
+		if [ -f "$${f}" ]; then
+			src="$${f}"
+			break 2
 		fi
-
-		src=""
-		if compgen -G ".pio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin" > /dev/null; then
-			src=".pio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin"
-		elif compgen -G ".pio/packages/framework-arduinoespressif32@*/tools/partitions/boot_app0.bin" > /dev/null; then
-			src="$$(ls -1 .pio/packages/framework-arduinoespressif32@*/tools/partitions/boot_app0.bin 2>/dev/null | head -n1)"
-		elif compgen -G "$$HOME/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin" > /dev/null; then
-			src="$$HOME/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin"
-		elif compgen -G "$$HOME/.platformio/packages/framework-arduinoespressif32@*/tools/partitions/boot_app0.bin" > /dev/null; then
-			src="$$(ls -1 $$HOME/.platformio/packages/framework-arduinoespressif32@*/tools/partitions/boot_app0.bin 2>/dev/null | head -n1)"
-		fi
-
-		if [[ -z "$$src" || ! -f "$$src" ]]; then
-			echo "ERROR: boot_app0.bin not found in framework-arduinoespressif32."
-			echo "Run '$(PIO) run -e $$env' first so PlatformIO installs the framework package."
-			exit 2
-		fi
-
-		mkdir -p "$$build_dir"
-		echo "boot_app0: $$src -> $$dest"
-		cp -f "$$src" "$$dest"
+		done
 	done
+
+	if [ -z "$${src}" ] || [ ! -f "$${src}" ]; then
+		echo "ERROR: boot_app0.bin not found in framework-arduinoespressif32."
+		exit 2
+	fi
+
+	mkdir -p "$${build_dir}"
+	echo "boot_app0: $${src} -> $${dest}"
+	cp -f "$${src}" "$${dest}"
+	done
+	SH
+	)"
+
 
 # Produces WLEDMM_x.y.z_CamelcasedTarget.bin by merging bootloader+partitions+boot_app0+firmware into one image.
 make-factory: ## Create factory (merged, flash-at-0x0) bins for each env in PIO_ENVS
@@ -360,24 +369,40 @@ make-factory: ## Create factory (merged, flash-at-0x0) bins for each env in PIO_
 			esac
 		fi
 
+		echo "Framework packages:"
+		ls -d "$$HOME/.platformio/packages/framework-arduinoespressif32"* 2>/dev/null || true
+		echo "Variant dirs (sample):"
+		for pkg in "$$HOME/.platformio/packages/framework-arduinoespressif32" "$$HOME/.platformio/packages/framework-arduinoespressif32@"*; do
+		[[ -d "$$pkg/variants" ]] || continue
+		echo "== $$pkg/variants =="
+		ls -1 "$$pkg/variants" | head -n 50
+		done
+
 		# Some Adafruit tinyUF2 envs don't emit bootloader.bin; recover from framework packages.
 		if [[ ! -f "$$bootloader" ]]; then
-			if [[ -n "$$variant" ]]; then
-				found_boot=0
-				for pkg in "$$HOME/.platformio/packages/framework-arduinoespressif32" \
+			found_boot=0
+			for pkg in "$$HOME/.platformio/packages/framework-arduinoespressif32" \
 					"$$HOME/.platformio/packages/framework-arduinoespressif32@"*; do
+				[[ -d "$$pkg" ]] || continue
+
+				cand=""
+				if [[ -n "$$variant" && -f "$$pkg/variants/$$variant/bootloader-tinyuf2.bin" ]]; then
 					cand="$$pkg/variants/$$variant/bootloader-tinyuf2.bin"
-					if [[ -f "$$cand" ]]; then
-						mkdir -p "$$build_dir"
-						echo "bootloader: $$cand -> $$bootloader (tinyUF2)"
-						cp -f "$$cand" "$$bootloader"
-						found_boot=1
-						break
-					fi
-				done
-				if [[ "$$found_boot" -eq 0 ]]; then
-					echo "bootloader-tinyuf2.bin not found for variant '$$variant'"
+				elif [[ -d "$$pkg/variants" ]]; then
+					cand="$$(find "$$pkg/variants" -maxdepth 3 -type f -name 'bootloader-tinyuf2.bin' 2>/dev/null | head -n1 || true)"
 				fi
+
+				if [[ -n "$$cand" && -f "$$cand" ]]; then
+					mkdir -p "$$build_dir"
+					echo "bootloader: $$cand -> $$bootloader (tinyUF2)"
+					cp -f "$$cand" "$$bootloader"
+					found_boot=1
+					break
+				fi
+			done
+
+			if [[ "$$found_boot" -eq 0 ]]; then
+				echo "bootloader-tinyuf2.bin not found for variant '$$variant'"
 			fi
 		fi
 
