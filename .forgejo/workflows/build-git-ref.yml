@@ -14,26 +14,52 @@ on:
         description: WLED-MM Git ref (tag/branch/SHA) to build. Defaults to latest release
         required: false
 
+env:
+  ENV_LIST: |
+    adafruit_matrix_portal_s3
+    esp32-a1s_audio_sender
+    lilygo_t7_s3_moonhub75
+    quinled_dig2go
+    quinled_diguno
+    quinled_diguno_eth
+    quinled_diguno_eth_temp
+    quinled_diguno_temp
+
 jobs:
-  build:
+  compute:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    outputs:
+      envs: ${{ steps.compute.outputs.envs }}
+    steps:
+      - id: compute
+        shell: bash -euo pipefail {0}
+        run: |
+          # Create JSON array from multi-line ENV_LIST
+          mapfile -t envs < <(printf '%s\n' "$ENV_LIST" | sed '/^[[:space:]]*$/d')
+          json="$(printf '%s\n' "${envs[@]}" | jq -R -s -c 'split("\n")[:-1]')"
+          echo "envs=$json" | tee -a "$GITHUB_OUTPUT"
+
+  checkout:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.upstream.outputs.version }}
+      git-ref: ${{ inputs['git-ref'] != '' && inputs['git-ref'] || steps.upstream.outputs.git_ref }}
+      repo-artifact-id: ${{ steps.upload.outputs['artifact-id'] }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Fetch latest upstream release version
-        if: ${{ forgejo.event_name == 'push' || inputs.git-ref == '' }}
+        if: ${{ github.event_name == 'push' || inputs['git-ref'] == '' }}
         id: upstream
         shell: bash -euo pipefail {0}
+        env:
+          GH_PAT_TREYTURNER: ${{ secrets.GH_PAT_TREYTURNER }}
         run: |
-          version=$(curl -fsSL "https://api.github.com/repos/MoonModules/WLED-MM/releases?per_page=50" \
-            | jq -r '
-              map(select(.draft == false and .prerelease == false))
-              | max_by(.published_at)
-              | .tag_name
-              | ltrimstr("v")')
+          version=$(curl -fsSL \
+            -H "Authorization: Bearer $GH_PAT_TREYTURNER" \
+            "https://api.github.com/repos/MoonModules/WLED-MM/releases/latest" \
+            | jq -r '.tag_name | ltrimstr("v")')
 
           if [[ -z "$version" || "$version" == "null" ]]; then
             echo "ERROR: Unable to determine latest upstream release tag."
@@ -42,49 +68,102 @@ jobs:
 
           { echo "version=$version"
             echo "git_ref=v$version"
-          } | tee -a "$FORGEJO_OUTPUT"
+          } | tee -a "$GITHUB_OUTPUT"
+
+      - name: Checkout upstream Git ref
+        env:
+          GIT_REF: ${{ inputs['git-ref'] != '' && inputs['git-ref'] || steps.upstream.outputs.git_ref }}
+        run: |
+          make checkout GIT_REF="$GIT_REF"
+
+      - name: Collect dependencies and prepare toolchains
+        run: |
+          make build-prep ENV_LIST="$ENV_LIST"
+
+      - name: Package workspace
+        run: |
+          tar -czf /tmp/repo.tgz .
+          echo "moving /tmp/repo.tgz ($(du -h --apparent-size -- "/tmp/repo.tgz" | cut -f1)) to $(pwd)..."
+          mv /tmp/repo.tgz repo.tgz
+
+      - name: Upload workspace
+        id: upload
+        uses: actions/upload-artifact@v3
+        with:
+          name: repo
+          path: repo.tgz
+
+  build:
+    needs: [compute, checkout]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        environment: ${{ fromJSON(needs.compute.outputs.envs) }}
+    steps:
+      - name: Download workspace
+        uses: actions/download-artifact@v3
+        with:
+          name: repo
+
+      - name: Extract workspace
+        run: |
+          tar -xzf repo.tgz
+          rm repo.tgz
 
       - name: Build
         env:
-          GIT_REF: ${{ inputs.git-ref || steps.upstream.outputs.git_ref }}
+          GIT_REF: ${{ inputs['git-ref'] != '' && inputs['git-ref'] || needs.checkout.outputs['git-ref'] }}
+          ENVIRONMENT: ${{ matrix.environment }}
         run: |
-          make build GIT_REF="$GIT_REF"
+          make build GIT_REF="$GIT_REF" PIO_ENVS="$ENVIRONMENT"
 
-      - name: Release build artifacts
+      - name: Upload binaries
+        uses: actions/upload-artifact@v3
+        with:
+          name: build-${{ matrix.environment }}
+          path: build/*
+
+  publish:
+    needs: [checkout, build]
+    runs-on: ubuntu-latest
+    outputs:
+      release-id: ${{ steps.release.outputs.release_id }}
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v3
+        with:
+          pattern: build-*
+          path: build
+          merge-multiple: true
+
+      - name: Collect and assert binaries
+        id: find
+        run: |
+          mapfile -d '' -t files < <(find build -type f -name '*.bin' -print0)
+
+          env_count=$(printf '%s\n' "$ENV_LIST" | sed '/^[[:space:]]*$/d' | wc -l)
+          expected=$(( env_count * 2 ))
+          actual=${#files[@]}
+
+          if (( actual != expected )); then
+            echo "ERROR: Expected $expected .bin files (2 per env for $env_count envs), got $actual"
+            printf '%s\n' "${files[@]}"
+            exit 1
+          fi
+
+          { echo "files<<EOF"
+            printf '%s\n' "${files[@]}"
+            echo "EOF"
+          } | tee -a "$GITHUB_OUTPUT"
+
+      - name: Create release
+        id: release
+        shell: bash -euo pipefail {0}
         env:
-          RUN_ID: ${{ forgejo.run_id }}
-          RUN_ATTEMPT: ${{ forgejo.run_attempt }}
-          GIT_REF: ${{ inputs.git-ref || steps.upstream.outputs.git_ref }}
-          FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
-          FORGEJO_API_URL: ${{ forgejo.api_url }}
-          FORGEJO_SERVER_URL: ${{ forgejo.server_url }}
-          FORGEJO_REPOSITORY: ${{ forgejo.repository }}
-          FORGEJO_SHA: ${{ forgejo.sha }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          GIT_REF: ${{ inputs['git-ref'] || needs.checkout.outputs['git-ref'] }}
         run: |
-          set -euo pipefail
-
-          token="${FORGEJO_TOKEN:-}"
-          if [[ -z "$token" ]]; then
-            echo "ERROR: Missing FORGEJO_TOKEN"
-            exit 1
-          fi
-
-          repo="${FORGEJO_REPOSITORY:-}"
-          if [[ -z "$repo" ]]; then
-            echo "ERROR: forgejo.repository not available."
-            exit 1
-          fi
-
-          api_url="${FORGEJO_API_URL:-}"
-          if [[ -z "$api_url" && -n "${FORGEJO_SERVER_URL:-}" ]]; then
-            api_url="${FORGEJO_SERVER_URL%/}/api/v1"
-          fi
-          if [[ -z "$api_url" ]]; then
-            echo "ERROR: forgejo.api_url/server_url not available."
-            exit 1
-          fi
-
-          ref=""
           tag="${GIT_REF}-${RUN_ID}-${RUN_ATTEMPT}"
           if [[ "$GIT_REF" == "mdev" ]]; then
             # Stamp trunk builds with datetime and SHA
@@ -101,60 +180,73 @@ jobs:
             tag="mdev-${dt}-${short_sha}-${RUN_ATTEMPT}"
           fi
 
-          export RELEASE_TAG="$tag"
-          target="${FORGEJO_SHA:-}"
-          payload="$(python3 - <<'PY'
-          import json, os
-          tag = os.environ["RELEASE_TAG"]
-          target = os.environ.get("FORGEJO_SHA", "")
-          print(json.dumps({
-            "tag_name": tag,
-            "name": tag,
-            "target_commitish": target,
-            "draft": False,
-            "prerelease": False
-          }))
-          PY
-          )"
+          payload=$(jq -n \
+            --arg tag "$tag" \
+            --arg sha "${GITHUB_SHA:-}" \
+            '{
+              tag_name: $tag,
+              name: $tag,
+              target_commitish: $sha,
+              draft: false,
+              prerelease: false
+            }')
 
-          release_json="$(curl -sS -X POST \
-            -H "Authorization: token $token" \
+          stamp=$(date +%Y%m%d%H%M%S)
+          response="$(curl -sS \
+            -D /tmp/headers-$stamp.txt \
+            -o /tmp/body-$stamp.txt \
+            -X POST \
+            -H "Authorization: token ${GITHUB_TOKEN}" \
             -H "Content-Type: application/json" \
-            "$api_url/repos/$repo/releases" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/releases" \
             -d "$payload")"
 
-          release_id="$(python3 - <<'PY'
-          import json, sys
-          data = json.load(sys.stdin)
-          print(data.get("id", ""))
-          PY
-          <<<"$release_json")"
-
-          if [[ -z "$release_id" ]]; then
-            echo "ERROR: release creation failed: $release_json"
+          ct="$(awk 'tolower($1)=="content-type:" {print tolower($2)}' /tmp/headers-$stamp.txt | tr -d '\r' | head -n1)"
+          if [[ "$ct" != application/json* ]]; then
+            echo "ERROR: Non-JSON response:"; echo
+            echo "Headers:"; cat /tmp/headers-$stamp.txt; echo
+            echo "Body:"; cat /tmp/body-$stamp.txt
             exit 1
           fi
 
-          shopt -s nullglob
-          files=(build/*)
-          if [[ ${#files[@]} -eq 0 ]]; then
-            echo "ERROR: No build artifacts found in build/."
-            exit 1
-          fi
+          release_id="$(jq -r '.id // empty' /tmp/body-$stamp.txt)"
+          [[ -n "$release_id" ]] || { echo "ERROR: release creation failed:"; cat /tmp/body-$stamp.txt; exit 1; }
+          echo "release_id=$release_id" | tee -a "$GITHUB_OUTPUT"
 
+      - name: Attach build artifacts
+        id: attach
+        shell: bash -euo pipefail {0}
+        env:
+          FILES: ${{ steps.find.outputs.files }}
+          RELEASE_ID: ${{ steps.release.outputs.release_id }}
+        run: |
+          mapfile -t files <<< "$FILES"
           for f in "${files[@]}"; do
-            if [[ ! -f "$f" ]]; then
-              continue
-            fi
+            [[ -f "$f" ]] || continue
             name="$(basename "$f")"
-            encoded="$(ASSET_NAME="$name" python3 - <<'PY'
-            import os, urllib.parse
-            print(urllib.parse.quote(os.environ["ASSET_NAME"]))
-            PY
-            )"
-            curl -sS --fail -X POST \
-              -H "Authorization: token $token" \
+            encoded=$(jq -rn --arg s "$name" '$s|@uri')
+            echo "Uploading asset: $name"
+            curl -sS --fail \
+              -X POST \
+              -H "Authorization: token ${GITHUB_TOKEN}" \
               -H "Content-Type: application/octet-stream" \
-              "$api_url/repos/$repo/releases/$release_id/assets?name=$encoded" \
-              --data-binary @"$f" >/dev/null
+              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?name=$encoded" \
+              --data-binary @"$f" \
+              >/dev/null
           done
+
+  cleanup:
+    needs: [checkout, build, publish]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete repo artifact
+        shell: bash -euo pipefail {0}
+        env:
+          RELEASE_ID: ${{ needs.publish.outputs['release-id'] }}
+          REPO_ARTIFACT_ID: ${{ needs.checkout.outputs['repo-artifact-id'] }}
+        run: |
+          response="$(curl -sS \
+            -X DELETE \
+            -H "Authorization: token ${GITHUB_TOKEN}" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runs/${{ github.run_id }}/artifacts/repo" \
+          )"
