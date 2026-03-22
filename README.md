@@ -24,7 +24,6 @@ Unofficial [WLED Moon Modules](https://mm.kno.wled.ge/) builds for [QuinLED](htt
 - [An-Penta-Deca](https://quinled.info/quinled-an-penta-deca/)
 - [An-Penta-Plus](https://quinled.info/quinled-an-penta-plus/)
 
-
 ## Environment Variables
 
 - `IOT_SSID`: If set, will be supplied to build as `CLIENT_SSID`
@@ -32,22 +31,28 @@ Unofficial [WLED Moon Modules](https://mm.kno.wled.ge/) builds for [QuinLED](htt
 
 ## Building
 
-1. Clone repo
+1. Clone and change directory into repo
+
     ```bash
-    git clone https://forgejo.treyturner.info/treyturner/wled-mm-builds.git
+    git clone https://github.com/treyturner/wled-mm-builds.git \
+    && cd wled-mm-builds
     ```
 
 1. Checkout WLED-MM source
 
-    ```
+    ```bash
     make checkout GIT_REF="v14.7.1"
     ```
+
 1. Build
     1. All targets:
+
         ```bash
         make build GIT_REF="v14.7.1"
         ```
+
     1. Or one or more space-separated targets:
+
         ```bash
         make build GIT_REF="v14.7.1" PIO_ENVS="quinled_dig2go quinled_diguno_eth_temp"
         ```

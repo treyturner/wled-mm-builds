@@ -24,6 +24,7 @@ WLEDMM_URL   ?= https://github.com/MoonModules/WLED-MM.git
 WLEDMM_DIR   ?= WLED-MM
 CLONE_DEPTH  ?= 1
 GIT_REF      ?=
+GH_PAT       ?=
 OUT_DIR      ?= build
 
 ### Env selection
@@ -114,7 +115,7 @@ ifeq ($(strip $(PIO_ENVS)),)
 endif
 
 
-clone: ## Shallow clone WLED-MM at a particular Git ref (tag/branch/SHA). Usage: make clone GIT_REF=v14.7.1
+clone: ## Shallow clone WLED-MM at a particular Git ref (tag/branch/SHA). Usage: make clone GIT_REF=v14.7.1 [GH_PAT=token]
 	@if [[ -z "$(GIT_REF)" ]]; then
 		echo "ERROR: missing GIT_REF. Example: make clone GIT_REF=v14.7.1"
 		exit 2
@@ -128,14 +129,22 @@ clone: ## Shallow clone WLED-MM at a particular Git ref (tag/branch/SHA). Usage:
 	mkdir -p "$(WLEDMM_DIR)"
 	cd "$(WLEDMM_DIR)"
 	git init -q
-	git remote add origin "$(WLEDMM_URL)"
+
+	# Prepare authenticated URL if PAT provided
+	remote_url="$(WLEDMM_URL)"
+	if [[ -n "$(GH_PAT)" && "$$remote_url" =~ ^https:// ]]; then
+		remote_url="$${remote_url#https://}"
+		remote_url="https://$(GH_PAT):x-oauth-basic@$${remote_url}"
+	fi
+
+	git remote add origin "$$remote_url"
 
 	# Reuse the same logic for tags/branches/SHA
 	cd ..
-	$(MAKE) checkout GIT_REF="$(GIT_REF)"
+	$(MAKE) checkout GIT_REF="$(GIT_REF)" GH_PAT="$(GH_PAT)"
 
 
-checkout: ## Checkout a tag/branch/commit of existing WLEDMM. Usage: make checkout GIT_REF=v14.7.1
+checkout: ## Checkout a tag/branch/commit of existing WLEDMM. Usage: make checkout GIT_REF=v14.7.1 [GH_PAT=token]
 	@if [[ -z "$(GIT_REF)" ]]; then
 		echo "ERROR: missing GIT_REF (tag, branch, or SHA). Example: make checkout GIT_REF=v14.7.1"
 		exit 2
@@ -150,14 +159,27 @@ checkout: ## Checkout a tag/branch/commit of existing WLEDMM. Usage: make checko
 		export GIT_SSH_COMMAND='ssh -oBatchMode=yes -oStrictHostKeyChecking=accept-new'
 	fi
 
+	# Use GitHub PAT for HTTPS URLs if provided
+	git_url="$(WLEDMM_URL)"
+	if [[ -n "$(GH_PAT)" && "$$git_url" =~ ^https:// ]]; then
+		git_url="$${git_url#https://}"
+		git_url="https://$(GH_PAT):x-oauth-basic@$${git_url}"
+	fi
+
 	# Ensure repo exists
 	if [[ ! -d "$(WLEDMM_DIR)/.git" ]]; then
 		echo "WLED-MM not found; cloning shallow..."
-		$(MAKE) clone GIT_REF="$(GIT_REF)"
+		$(MAKE) clone GIT_REF="$(GIT_REF)" GH_PAT="$(GH_PAT)"
 		exit 0
 	fi
 
 	cd "$(WLEDMM_DIR)"
+
+	# Update remote URL if PAT provided (for authentication to GitHub API)
+	if [[ -n "$$git_url" ]]; then
+		git remote set-url origin "$$git_url"
+	fi
+
 	ref="$(GIT_REF)"
 
 	# Normalize tag candidates: allow vX.Y.Z or X.Y.Z
@@ -216,8 +238,12 @@ checkout: ## Checkout a tag/branch/commit of existing WLEDMM. Usage: make checko
 
 build-prep:
 	@ln -sf "$(PLATFORM_OVERRIDE_INI)" "$(REPO_ROOT)/$(WLEDMM_DIR)/platformio_override.ini"
+	ls -al "$(REPO_ROOT)/$(WLEDMM_DIR)/platformio_override.ini"
+	cat "$(REPO_ROOT)/$(WLEDMM_DIR)/platformio_override.ini"
 	$(WITH_BUILDER) npm ci --prefer-offline --no-audit --no-fund
 	env_args=(); while IFS= read -r e; do [[ -n "$$e" ]] && env_args+=(-e "$$e"); done <<<"$${ENV_LIST:-}"
+	echo "env_args: $${env_args[@]}"
+	$(PIO) run --list-targets
 	$(PIO) pkg install "$${env_args[@]}"
 	$(PIO) run "$${env_args[@]}" -t envdump
 
