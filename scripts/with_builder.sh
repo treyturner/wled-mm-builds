@@ -57,5 +57,5 @@ docker run --rm \
   -v "$NODE_CACHE_DIR:/node-cache" \
   "${MOUNTS[@]}" \
   -w "$WORKDIR" \
-  forgejo.treyturner.info/treyturner/platformio-builder \
+  ghcr.io/treyturner/platformio-builder \
   "$@"
