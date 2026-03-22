@@ -74,8 +74,9 @@ jobs:
       - name: Checkout upstream Git ref
         env:
           GIT_REF: ${{ inputs['git-ref'] != '' && inputs['git-ref'] || steps.upstream.outputs.git_ref }}
+          GH_PAT: ${{ secrets.GH_PAT_WLED_MM_FETCH }}
         run: |
-          make checkout GIT_REF="$GIT_REF"
+          make checkout GIT_REF="$GIT_REF" GH_PAT="$GH_PAT"
 
       - name: Collect dependencies and prepare toolchains
         run: |
