@@ -238,11 +238,8 @@ checkout: ## Checkout a tag/branch/commit of existing WLEDMM. Usage: make checko
 
 build-prep:
 	@ln -sf "$(PLATFORM_OVERRIDE_INI)" "$(REPO_ROOT)/$(WLEDMM_DIR)/platformio_override.ini"
-	ls -al "$(REPO_ROOT)/$(WLEDMM_DIR)/platformio_override.ini"
-	cat "$(REPO_ROOT)/$(WLEDMM_DIR)/platformio_override.ini"
 	$(WITH_BUILDER) npm ci --prefer-offline --no-audit --no-fund
 	env_args=(); while IFS= read -r e; do [[ -n "$$e" ]] && env_args+=(-e "$$e"); done <<<"$${ENV_LIST:-}"
-	echo "env_args: $${env_args[@]}"
 	$(PIO) run --list-targets
 	$(PIO) pkg install "$${env_args[@]}"
 	$(PIO) run "$${env_args[@]}" -t envdump

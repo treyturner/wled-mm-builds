@@ -17,11 +17,9 @@ if [[ ! -f "$WLED_DIR/platformio.ini" ]]; then
   exit 2
 fi
 
-PIO_CACHE_DIR="${PIO_CACHE_DIR:-platformio-cache}"
-NODE_CACHE_DIR="${NODE_CACHE_DIR:-node-cache}"
-
-# mkdir -p "$PIO_CACHE_DIR" "$NODE_CACHE_DIR/npm"
-
+PIO_CACHE_DIR="$HOME/.platformio"
+BUILDER_CACHE_DIR="$HOME/.platformio-builder/${CACHE_KEY:-WLED-MM}"
+NODE_CACHE_DIR="$BUILDER_CACHE_DIR/node_modules"
 
 docker run --rm \
   $([ -t 0 ] && echo -t) $([[ "$-" =~ i ]] && echo -i) \
