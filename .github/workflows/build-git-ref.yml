@@ -281,7 +281,7 @@ jobs:
           done
 
   cleanup-after-build:
-    if: github.event_name == 'pull_request'
+    if: always() && github.event_name == 'pull_request'
     needs: [prep-build, build]
     runs-on: ubuntu-latest
     permissions:
@@ -298,7 +298,7 @@ jobs:
             "${{ github.api_url }}/repos/${GITHUB_REPOSITORY}/actions/artifacts/${REPO_ARTIFACT_ID}"
 
   cleanup-after-publish:
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    if: always() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     needs: [prep-build, build, publish]
     runs-on: ubuntu-latest
     permissions:
