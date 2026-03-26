@@ -173,6 +173,8 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
           GIT_REF: ${{ inputs['git-ref'] != '' && inputs['git-ref'] || needs.prep-build.outputs['git-ref'] }}
+          REPO: ${{ github.repository }}
+          TARGET_SHA: ${{ github.sha }}
         run: |
           tag="${GIT_REF}-${RUN_ID}-${RUN_ATTEMPT}"
           if [[ "$GIT_REF" == "mdev" ]]; then
@@ -192,7 +194,7 @@ jobs:
 
           payload=$(jq -n \
             --arg tag "$tag" \
-            --arg sha "${GITHUB_SHA:-}" \
+            --arg sha "$TARGET_SHA" \
             '{
               tag_name: $tag,
               name: $tag,
@@ -210,6 +212,30 @@ jobs:
             ["forgejo"]="${{ secrets.FORGEJO_REPOSITORY_TOKEN }}"
           )
 
+          echo "Triggering Forgejo mirror sync..."
+          curl -sS -X POST \
+            -H "Authorization: token ${tokens[forgejo]}" \
+            "${api_urls[forgejo]}/repos/${REPO}/mirror-sync"
+
+          probe_interval=5
+          echo "Waiting for ${TARGET_SHA} to appear in Forgejo..."
+          for i in $(seq 1 24); do
+            sleep $probe_interval
+            status=$(curl -sS -o /dev/null -w "%{http_code}" \
+              -H "Authorization: token ${tokens[forgejo]}" \
+              "${api_urls[forgejo]}/repos/${REPO}/git/commits/${TARGET_SHA}")
+            if [[ "$status" == "200" ]]; then
+              echo "SHA found after $(( i * probe_interval )) seconds."
+              break
+            fi
+            echo "Attempt ${i}/24: HTTP $status, retrying in ${probe_interval}s..."
+          done
+
+          if [[ "$status" != "200" ]]; then
+            echo "ERROR: Timed out waiting for Forgejo to mirror ${TARGET_SHA}"
+            exit 1
+          fi
+
           for provider in github forgejo; do
             api_url="${api_urls[$provider]}"
             token="${tokens[$provider]}"
@@ -221,7 +247,7 @@ jobs:
               -X POST \
               -H "Authorization: token ${token}" \
               -H "Content-Type: application/json" \
-              "$api_url/repos/${{ github.repository }}/releases" \
+              "$api_url/repos/${REPO}/releases" \
               -d "$payload"
 
             ct="$(awk 'tolower($1)=="content-type:" {print tolower($2)}' /tmp/headers-$stamp.txt | tr -d '\r' | head -n1)"
