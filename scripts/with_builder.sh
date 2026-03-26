@@ -17,12 +17,6 @@ if [[ ! -f "$WLED_DIR/platformio.ini" ]]; then
   exit 2
 fi
 
-PIO_CACHE_DIR="${PIO_CACHE_DIR:-platformio-cache}"
-NODE_CACHE_DIR="${NODE_CACHE_DIR:-node-cache}"
-
-# mkdir -p "$PIO_CACHE_DIR" "$NODE_CACHE_DIR/npm"
-
-
 docker run --rm \
   $([ -t 0 ] && echo -t) $([[ "$-" =~ i ]] && echo -i) \
   --pull always \
@@ -36,13 +30,10 @@ docker run --rm \
   -e OUT_DIR \
   -e WLEDMM_DIR \
   -e WPA_KEY \
-  -e PLATFORMIO_CORE_DIR=/home/pio/.platformio \
-  -e PLATFORMIO_BUILD_CACHE_DIR=/tmp/pio-buildcache \
   -e PLATFORMIO_NO_ANSI \
   -e PLATFORMIO_DISABLE_PROGRESSBAR \
-  -v "$PIO_CACHE_DIR:/home/pio/.platformio" \
-  -e NPM_CONFIG_CACHE=/node-cache/npm \
-  -v "$NODE_CACHE_DIR:/node-cache" \
+  -e PLATFORMIO_CORE_DIR=/work/.platformio \
+  -e NPM_CONFIG_CACHE=/work/.npm \
   -v "$REPO_ROOT:/work" \
   -w "/work/$WLEDMM_DIR" \
   ghcr.io/treyturner/platformio-builder \

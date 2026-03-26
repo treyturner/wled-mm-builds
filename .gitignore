@@ -1,2 +1,4 @@
 /WLED-MM
 /build
+.npm
+.platformio
