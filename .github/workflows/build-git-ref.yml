@@ -133,6 +133,8 @@ jobs:
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     needs: [prep-build, build]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     outputs:
       github-release-id: ${{ steps.release.outputs.github_release_id }}
       forgejo-release-id: ${{ steps.release.outputs.forgejo_release_id }}
