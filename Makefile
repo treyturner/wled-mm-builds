@@ -237,15 +237,16 @@ checkout: ## Checkout a tag/branch/commit of existing WLEDMM. Usage: make checko
 
 
 build-prep:
-	@ln -sf "$(PLATFORM_OVERRIDE_INI)" "$(REPO_ROOT)/$(WLEDMM_DIR)/platformio_override.ini"
-	ls -al "$(REPO_ROOT)/$(WLEDMM_DIR)/platformio_override.ini"
-	cat "$(REPO_ROOT)/$(WLEDMM_DIR)/platformio_override.ini"
+	@install -m 0644 "$(PLATFORM_OVERRIDE_INI)" "$(REPO_ROOT)/$(WLEDMM_DIR)/platformio_override.ini"
 	$(WITH_BUILDER) npm ci --prefer-offline --no-audit --no-fund
-	env_args=(); while IFS= read -r e; do [[ -n "$$e" ]] && env_args+=(-e "$$e"); done <<<"$${ENV_LIST:-}"
-	echo "env_args: $${env_args[@]}"
-	$(PIO) run --list-targets
+	selected_envs="$${ENV_LIST:-$(PIO_ENVS)}"
+	env_args=(); for e in $$selected_envs; do [[ -n "$$e" ]] && env_args+=(-e "$$e"); done
+	if [[ -n "$$selected_envs" ]]; then
+		echo "Preparing PlatformIO envs: $$selected_envs"
+	else
+		echo "Preparing PlatformIO default_envs from WLED-MM/platformio.ini"
+	fi
 	$(PIO) pkg install "$${env_args[@]}"
-	$(PIO) run "$${env_args[@]}" -t envdump
 
 
 build: ## Compile the project source files (envs from platform_override.ini [platformio].default_envs)
@@ -336,6 +337,8 @@ make-factory: ## Create factory (merged, flash-at-0x0) bins for each env in PIO_
 
 clean: ## Sync source with HEAD and remove generated files/directories
 	@rm -rf "$(OUT_DIR)"
+	rm -rf .platformio
+	rm -rf .npm
 	if [[ -d "$(WLEDMM_DIR)" ]]; then
 		cd "$(WLEDMM_DIR)"
 		git reset --hard HEAD
@@ -344,8 +347,11 @@ clean: ## Sync source with HEAD and remove generated files/directories
 	fi
 
 
-build-from-wsl: # Personal use ;D
+ship-local:
 	@tag=$$(curl -fsSL "https://api.github.com/repos/MoonModules/WLED-MM/releases?per_page=50" | jq -r ' \
 		map(select(.draft == false and .prerelease == false)) | max_by(.published_at) | .tag_name')
-	$(MAKE) build GIT_REF="$$tag" PIO_ENVS="$(PIO_ENVS)"
+	$(MAKE) clean
+	$(MAKE) checkout GIT_REF="$$tag"
+	$(MAKE) build-prep
+	$(MAKE) build
 	cp -r "$(OUT_DIR)"/* "/mnt/d/Apps/ESP32 Flash Tool/bin/"

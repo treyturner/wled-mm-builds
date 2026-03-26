@@ -41,7 +41,12 @@ sanitize_name() {
   printf '%s' "$s" | sed -E 's/["'"'"'\\]//g; s/^MM[[:space:]]+//'
 }
 
-esptool_cmd=(pio pkg exec -p tool-esptoolpy -- esptool.py)
+esptool_py="$PIO_HOME/packages/tool-esptoolpy/esptool.py"
+if [[ ! -f "$esptool_py" ]]; then
+  echo "ERROR: esptool.py not found in PlatformIO packages: $esptool_py"
+  exit 2
+fi
+esptool_cmd=(python3 "$esptool_py")
 
 mkdir -p "$REPO_ROOT/$OUT_DIR"
 
@@ -156,11 +161,23 @@ for env in "$@"; do
   # Determine chip family from bootloader image to pick correct bootloader offset:
   # - ESP32 classic often uses 0x1000
   # - ESP32-S3/C3/C6/H2/C2 typically use 0x0
-  chip="$( ("${esptool_cmd[@]}" image_info "$bootloader" 2>/dev/null) \
-    | sed -n -E 's/^Detected (chip type|image type):[[:space:]]*//p; s/^Chip is[[:space:]]*//p' \
+  image_info_out="$(
+    "${esptool_cmd[@]}" image_info "$bootloader" 2>/dev/null \
+      || "${esptool_cmd[@]}" image-info "$bootloader" 2>/dev/null \
+      || true
+  )"
+  chip="$( printf '%s\n' "$image_info_out" \
+    | sed -n -E \
+      -e 's/^Detected (chip type|image type):[[:space:]]*//p' \
+      -e 's/^Chip is[[:space:]]*//p' \
+      -e 's/^Chip ID:[[:space:]]*[0-9]+[[:space:]]*\(([^)]+)\).*$/\1/p' \
+      -e 's/^([A-Za-z0-9-]+)[[:space:]]+Image Header$/\1/p' \
     | head -n1 | tr -d '\r' | sed -E 's/^[[:space:]]+|[[:space:]]+$//g' || true )"
   if [[ -z "$chip" ]]; then
     echo "ERROR: failed to detect chip type from: $bootloader"
+    if [[ -n "$image_info_out" ]]; then
+      printf '%s\n' "$image_info_out"
+    fi
     echo "Ensure bootloader.bin exists and esptool can parse it."
     exit 2
   fi

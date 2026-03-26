@@ -7,7 +7,13 @@ on:
     paths-ignore:
       - README.md
       - LICENSE
-
+  pull_request:
+    types: [opened, reopened, synchronize]
+    branches:
+      - main
+    paths-ignore:
+      - README.md
+      - LICENSE
   workflow_dispatch:
     inputs:
       git-ref:
@@ -26,7 +32,8 @@ env:
     quinled_diguno_temp
 
 jobs:
-  compute:
+  compute-targets:
+    name: Compute targets
     runs-on: ubuntu-latest
     outputs:
       envs: ${{ steps.compute.outputs.envs }}
@@ -39,14 +46,15 @@ jobs:
           json="$(printf '%s\n' "${envs[@]}" | jq -R -s -c 'split("\n")[:-1]')"
           echo "envs=$json" | tee -a "$GITHUB_OUTPUT"
 
-  checkout:
+  prep-build:
     runs-on: ubuntu-latest
+    name: Checkout code, install deps, package and upload repo for build fork
     outputs:
       version: ${{ steps.upstream.outputs.version }}
       git-ref: ${{ inputs['git-ref'] != '' && inputs['git-ref'] || steps.upstream.outputs.git_ref }}
       repo-artifact-id: ${{ steps.upload.outputs['artifact-id'] }}
     steps:
-      - name: Checkout
+      - name: Checkout build repo
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
       - name: Fetch latest upstream release version
@@ -55,11 +63,10 @@ jobs:
         shell: bash -euo pipefail {0}
         env:
           UPSTREAM_REPO: MoonModules/WLED-MM
-          GH_PAT_WLED_MM_FETCH: ${{ secrets.GH_PAT_WLED_MM_FETCH }}
         run: |
           version=$(curl -fsSL \
-            -H "Authorization: Bearer ${GH_PAT_WLED_MM_FETCH}" \
-            "${GITHUB_API_URL}/repos/${UPSTREAM_REPO}/releases/latest" \
+            -H "Authorization: Bearer ${{ secrets.GH_PAT_WLED_MM_FETCH }}" \
+            "${{ github.api_url }}/repos/${UPSTREAM_REPO}/releases/latest" \
             | jq -r '.tag_name | ltrimstr("v")')
 
           if [[ -z "$version" || "$version" == "null" ]]; then
@@ -74,14 +81,9 @@ jobs:
       - name: Checkout upstream Git ref
         env:
           GIT_REF: ${{ inputs['git-ref'] != '' && inputs['git-ref'] || steps.upstream.outputs.git_ref }}
-          GH_PAT: ${{ secrets.GH_PAT_WLED_MM_FETCH }}
-        run: |
-          make checkout GIT_REF="$GIT_REF" GH_PAT="$GH_PAT"
+        run: make checkout GIT_REF="$GIT_REF" GH_PAT="${{ secrets.GH_PAT_WLED_MM_FETCH }}"
 
       - name: Collect dependencies and prepare toolchains
-        env:
-          PUID: 1001
-          PGID: 121
         run: make build-prep ENV_LIST="$ENV_LIST"
 
       - name: Package workspace
@@ -98,11 +100,11 @@ jobs:
           path: repo.tgz
 
   build:
-    needs: [compute, checkout]
+    needs: [compute-targets, prep-build]
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        environment: ${{ fromJSON(needs.compute.outputs.envs) }}
+        environment: ${{ fromJSON(needs.compute-targets.outputs.envs) }}
     steps:
       - name: Download workspace
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
@@ -116,10 +118,8 @@ jobs:
 
       - name: Build
         env:
-          GIT_REF: ${{ inputs['git-ref'] != '' && inputs['git-ref'] || needs.checkout.outputs['git-ref'] }}
+          GIT_REF: ${{ inputs['git-ref'] != '' && inputs['git-ref'] || needs.prep-build.outputs['git-ref'] }}
           ENVIRONMENT: ${{ matrix.environment }}
-          PUID: 1001
-          PGID: 121
         run: |
           make build GIT_REF="$GIT_REF" PIO_ENVS="$ENVIRONMENT"
 
@@ -130,14 +130,12 @@ jobs:
           path: build/*
 
   publish:
-    needs: [checkout, build]
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    needs: [prep-build, build]
     runs-on: ubuntu-latest
     outputs:
       github-release-id: ${{ steps.release.outputs.github_release_id }}
       forgejo-release-id: ${{ steps.release.outputs.forgejo_release_id }}
-    env:
-      FORGEJO_API_URL: ${{ secrets.FORGEJO_API_URL }}
-      FORGEJO_TOKEN: ${{ secrets.FORGEJO_REPOSITORY_TOKEN }}
     steps:
       - name: Download build artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
@@ -172,7 +170,7 @@ jobs:
         env:
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
-          GIT_REF: ${{ inputs['git-ref'] || needs.checkout.outputs['git-ref'] }}
+          GIT_REF: ${{ inputs['git-ref'] != '' && inputs['git-ref'] || needs.prep-build.outputs['git-ref'] }}
         run: |
           tag="${GIT_REF}-${RUN_ID}-${RUN_ATTEMPT}"
           if [[ "$GIT_REF" == "mdev" ]]; then
@@ -201,14 +199,18 @@ jobs:
               prerelease: false
             }')
 
-          declare -A providers=(
-            ["github"]="$GITHUB_API_URL $GITHUB_TOKEN"
-            ["forgejo"]="$FORGEJO_API_URL $FORGEJO_TOKEN"
+          declare -A api_urls=(
+            ["github"]="${{ github.api_url }}"
+            ["forgejo"]="${{ secrets.FORGEJO_API_URL }}"
+          )
+          declare -A tokens=(
+            ["github"]="${{ github.token }}"
+            ["forgejo"]="${{ secrets.FORGEJO_REPOSITORY_TOKEN }}"
           )
 
-          for provider in "${!providers[@]}"; do
-            api_url=""; token=""
-            IFS=' ' read -r api_url token <<< "${providers[$provider]}"
+          for provider in github forgejo; do
+            api_url="${api_urls[$provider]}"
+            token="${tokens[$provider]}"
             stamp=$(date +%Y%m%d%H%M%S)
 
             curl -sS \
@@ -217,7 +219,7 @@ jobs:
               -X POST \
               -H "Authorization: token ${token}" \
               -H "Content-Type: application/json" \
-              "$api_url/repos/$GITHUB_REPOSITORY/releases" \
+              "$api_url/repos/${{ github.repository }}/releases" \
               -d "$payload"
 
             ct="$(awk 'tolower($1)=="content-type:" {print tolower($2)}' /tmp/headers-$stamp.txt | tr -d '\r' | head -n1)"
@@ -242,14 +244,23 @@ jobs:
           FORGEJO_RELEASE_ID: ${{ steps.release.outputs.forgejo_release_id }}
         run: |
           mapfile -t files <<< "$FILES"
-          declare -A providers=(
-            ["github"]="${GITHUB_API_URL} ${GITHUB_TOKEN} ${GITHUB_RELEASE_ID}"
-            ["forgejo"]="${FORGEJO_API_URL} ${FORGEJO_TOKEN} ${FORGEJO_RELEASE_ID}"
+          declare -A api_urls=(
+            ["github"]="${{ github.api_url }}"
+            ["forgejo"]="${{ secrets.FORGEJO_API_URL }}"
+          )
+          declare -A tokens=(
+            ["github"]="${{ github.token }}"
+            ["forgejo"]="${{ secrets.FORGEJO_REPOSITORY_TOKEN }}"
+          )
+          declare -A release_ids=(
+            ["github"]="$GITHUB_RELEASE_ID"
+            ["forgejo"]="$FORGEJO_RELEASE_ID"
           )
 
-          for provider in "${!providers[@]}"; do
-            api_url=""; token=""; release_id=""
-            IFS=' ' read -r api_url token release_id <<< "${providers[$provider]}"
+          for provider in github forgejo; do
+            api_url="${api_urls[$provider]}"
+            token="${tokens[$provider]}"
+            release_id="${release_ids[$provider]}"
 
             echo "Attaching binaries to $provider release..."
             for f in "${files[@]}"; do
@@ -267,17 +278,36 @@ jobs:
             done
           done
 
-  cleanup:
-    needs: [checkout, build, publish]
+  cleanup-after-build:
+    if: github.event_name == 'pull_request'
+    needs: [prep-build, build]
     runs-on: ubuntu-latest
+    permissions:
+      actions: write
     steps:
       - name: Delete repo artifact
         shell: bash -euo pipefail {0}
         env:
-          RELEASE_ID: ${{ needs.publish.outputs['github-release-id'] }}
-          REPO_ARTIFACT_ID: ${{ needs.checkout.outputs['repo-artifact-id'] }}
+          REPO_ARTIFACT_ID: ${{ needs.prep-build.outputs['repo-artifact-id'] }}
         run: |
-          curl -sS \
+          curl -sS --fail-with-body \
             -X DELETE \
-            -H "Authorization: token ${GITHUB_TOKEN}" \
-            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/artifacts/${REPO_ARTIFACT_ID}"
+            -H "Authorization: token ${{ github.token }}" \
+            "${{ github.api_url }}/repos/${GITHUB_REPOSITORY}/actions/artifacts/${REPO_ARTIFACT_ID}"
+
+  cleanup-after-publish:
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    needs: [prep-build, build, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Delete repo artifact
+        shell: bash -euo pipefail {0}
+        env:
+          REPO_ARTIFACT_ID: ${{ needs.prep-build.outputs['repo-artifact-id'] }}
+        run: |
+          curl -sS --fail-with-body \
+            -X DELETE \
+            -H "Authorization: token ${{ github.token }}" \
+            "${{ github.api_url }}/repos/${GITHUB_REPOSITORY}/actions/artifacts/${REPO_ARTIFACT_ID}"
