@@ -170,13 +170,13 @@ jobs:
         id: release
         shell: bash -euo pipefail {0}
         env:
-          RUN_ID: ${{ github.run_id }}
+          RUN_NUMBER: ${{ github.run_number }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
           GIT_REF: ${{ inputs['git-ref'] != '' && inputs['git-ref'] || needs.prep-build.outputs['git-ref'] }}
           REPO: ${{ github.repository }}
           TARGET_SHA: ${{ github.sha }}
         run: |
-          tag="${GIT_REF}-${RUN_ID}-${RUN_ATTEMPT}"
+          tag="${GIT_REF}-${RUN_NUMBER}.${RUN_ATTEMPT}"
           if [[ "$GIT_REF" == "mdev" ]]; then
             # Stamp trunk builds with datetime and SHA
             dt="$(date -u +%Y%m%d%H%M%S)"
