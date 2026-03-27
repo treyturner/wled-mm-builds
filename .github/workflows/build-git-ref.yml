@@ -246,8 +246,8 @@ jobs:
           FORGEJO_RELEASE_ID: ${{ steps.release.outputs.forgejo_release_id }}
         run: |
           mapfile -t files <<< "$FILES"
-          declare -A api_urls=(
-            ["github"]="${{ github.api_url }}"
+          declare -A upload_urls=(
+            ["github"]="https://uploads.github.com"
             ["forgejo"]="${{ secrets.FORGEJO_API_URL }}"
           )
           declare -A tokens=(
@@ -260,7 +260,7 @@ jobs:
           )
 
           for provider in github forgejo; do
-            api_url="${api_urls[$provider]}"
+            upload_url="${upload_urls[$provider]}"
             token="${tokens[$provider]}"
             release_id="${release_ids[$provider]}"
 
@@ -274,7 +274,7 @@ jobs:
                 -X POST \
                 -H "Authorization: token ${token}" \
                 -H "Content-Type: application/octet-stream" \
-                "${api_url}/repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?name=${encoded}" \
+                "${upload_url}/repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?name=${encoded}" \
                 --data-binary @"$f" \
                 >/dev/null
             done
