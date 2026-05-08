@@ -161,19 +161,49 @@ for env in "$@"; do
   # Determine chip family from bootloader image to pick correct bootloader offset:
   # - ESP32 classic often uses 0x1000
   # - ESP32-S3/C3/C6/H2/C2 typically use 0x0
-  image_info_out="$(
-    "${esptool_cmd[@]}" image_info "$bootloader" 2>/dev/null \
-      || "${esptool_cmd[@]}" image-info "$bootloader" 2>/dev/null \
-      || true
-  )"
-  chip="$( printf '%s\n' "$image_info_out" \
-    | sed -n -E \
-      -e 's/^Detected (chip type|image type):[[:space:]]*//p' \
-      -e 's/^Chip is[[:space:]]*//p' \
-      -e 's/^Chip ID:[[:space:]]*[0-9]+[[:space:]]*\(([^)]+)\).*$/\1/p' \
-      -e 's/^([A-Za-z0-9-]+)[[:space:]]+Image Header$/\1/p' \
-    | head -n1 | tr -d '\r' | sed -E 's/^[[:space:]]+|[[:space:]]+$//g' || true )"
-  if [[ -z "$chip" ]]; then
+  #
+  # Older esptool.py can mis-identify S2/S3/Cx bootloaders as ESP8266 unless
+  # a chip is supplied, so probe known ESP32-family chips and keep the first
+  # clean image_info result.
+  image_info_out=""
+  chip_norm=""
+  esptool_chip=""
+  for candidate in esp32 esp32s2 esp32s3 esp32c2 esp32c3 esp32c6 esp32h2; do
+    candidate_out="$(
+      "${esptool_cmd[@]}" --chip "$candidate" image_info "$bootloader" 2>&1 \
+        || "${esptool_cmd[@]}" --chip "$candidate" image-info "$bootloader" 2>&1 \
+        || true
+    )"
+    if [[ "$candidate_out" != *"Unexpected chip id"* \
+       && "$candidate_out" != *"A fatal error occurred"* \
+       && ( "$candidate_out" == *"Image version:"* || "$candidate_out" == *"Entry point:"* ) ]]; then
+      image_info_out="$candidate_out"
+      chip_norm="$candidate"
+      esptool_chip="$candidate"
+      break
+    fi
+  done
+
+  if [[ -z "$chip_norm" ]]; then
+    image_info_out="$(
+      "${esptool_cmd[@]}" image_info "$bootloader" 2>&1 \
+        || "${esptool_cmd[@]}" image-info "$bootloader" 2>&1 \
+        || true
+    )"
+    chip="$( printf '%s\n' "$image_info_out" \
+      | sed -n -E \
+        -e 's/^Detected (chip type|image type):[[:space:]]*//p' \
+        -e 's/^Chip is[[:space:]]*//p' \
+        -e 's/^Chip ID:[[:space:]]*[0-9]+[[:space:]]*\(([^)]+)\).*$/\1/p' \
+        -e 's/^([A-Za-z0-9-]+)[[:space:]]+Image Header$/\1/p' \
+      | head -n1 | tr -d '\r' | sed -E 's/^[[:space:]]+|[[:space:]]+$//g' || true )"
+    chip_norm="$(printf '%s' "$chip" | tr '[:upper:]' '[:lower:]' | tr -d '-')"
+    if [[ "$chip_norm" == "esp8266" ]]; then
+      chip_norm="esp32"
+    fi
+  fi
+
+  if [[ -z "$chip_norm" ]]; then
     echo "ERROR: failed to detect chip type from: $bootloader"
     if [[ -n "$image_info_out" ]]; then
       printf '%s\n' "$image_info_out"
@@ -181,9 +211,18 @@ for env in "$@"; do
     echo "Ensure bootloader.bin exists and esptool can parse it."
     exit 2
   fi
-  chip_norm="$(printf '%s' "$chip" | tr '[:upper:]' '[:lower:]' | tr -d '-')"
-  chip_disp="$chip"
-  esptool_chip="esp32"
+
+  case "$chip_norm" in \
+    esp32) chip_disp="ESP32" ;; \
+    esp32s2) chip_disp="ESP32-S2" ;; \
+    esp32s3) chip_disp="ESP32-S3" ;; \
+    esp32c2) chip_disp="ESP32-C2" ;; \
+    esp32c3) chip_disp="ESP32-C3" ;; \
+    esp32c6) chip_disp="ESP32-C6" ;; \
+    esp32h2) chip_disp="ESP32-H2" ;; \
+    *) chip_disp="$chip_norm" ;; \
+  esac
+  esptool_chip="${esptool_chip:-esp32}"
   case "$chip_norm" in \
     esp32) esptool_chip="esp32" ;; \
     esp32s2) esptool_chip="esp32s2" ;; \
